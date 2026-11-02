@@ -114,11 +114,11 @@ void setup() {
 }
 
 void loop() {
-  static uint32_t lastSyncTime = 0;
+  static uint32_t nextSyncTime = 0;
   const uint32_t syncIntervalUs = 500; // 2000 Hz
 
-  if ((micros() - lastSyncTime) >= syncIntervalUs) {
-    lastSyncTime = micros();
+  if ((micros() - nextSyncTime) >= syncIntervalUs) {
+    nextSyncTime += syncIntervalUs; // Incrément fixe pour éviter la dérive
 
     AccelData samples[3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
 
@@ -131,7 +131,7 @@ void loop() {
 
     triggerSync();
 
-    uint32_t ts = micros();
+    uint32_t ts = nextSyncTime;
     Serial.printf("%lu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
                   ts,
                   samples[0].x, samples[0].y, samples[0].z,
