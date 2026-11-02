@@ -6,7 +6,6 @@ const int NUM_SENSORS = 3;
 const int PIN_MISO = 13;
 const int PIN_MOSI = 11;
 const int PIN_SCLK = 12;
-
 const int PIN_SYNC = 14;
 
 const uint8_t CS_PINS[3] = {10, 9, 18};
@@ -19,8 +18,6 @@ const uint8_t ADXL357_REG_POWER_CTL    = 0x2D;
 const uint8_t ADXL357_REG_RESET        = 0x2F;
 
 const uint32_t SPI_FREQ = 4000000;
-
-// Facteur d'échelle pour l'ADXL357 en plage ±10g (51200 LSB/g)
 const float LSB_TO_G = 1.0f / 51200.0f; 
 
 struct AccelData {
@@ -28,6 +25,15 @@ struct AccelData {
   float y;
   float z;
 };
+
+// Structure compacte : 2 octets (en-tête) + 4 octets (timestamp) + 36 octets (9 floats) = 42 octets
+#pragma pack(push, 1)
+struct SensorPacket {
+  uint16_t header = 0xAA55;  
+  uint32_t timestamp;        
+  float    axis[3][3];       
+};
+#pragma pack(pop)
 
 void writeRegister(uint8_t csPin, uint8_t reg, uint8_t value) {
   SPI.beginTransaction(SPISettings(SPI_FREQ, MSBFIRST, SPI_MODE0));
@@ -54,24 +60,22 @@ AccelData readSensorFIFO(uint8_t csPin) {
 
   SPI.beginTransaction(SPISettings(SPI_FREQ, MSBFIRST, SPI_MODE0));
   digitalWrite(csPin, LOW);
-  
   SPI.transfer((ADXL357_REG_FIFO_DATA << 1) | 0x01);
   for (int i = 0; i < 9; i++) {
     rawBuf[i] = SPI.transfer(0x00);
   }
-  
   digitalWrite(csPin, HIGH);
   SPI.endTransaction();
 
   int32_t rawX = ((uint32_t)rawBuf[0] << 12) | ((uint32_t)rawBuf[1] << 4) | (rawBuf[2] >> 4);
-  int32_t rawY = ((uint32_t)rawBuf[3] << 12) | ((uint32_t)rawBuf[4] << 4) | (rawBuf[5] >> 4);
+  rawX = (rawX & 0x80000) ? (rawX | 0xFFF00000) : rawX;
+
+  int32_t rawY = ((uint32_t)rawBuf[3] << 12) | ((uint32_t)rawBuf[4] << 4) | (rawBuf[5] >> 4); // Correction ici
+  rawY = (rawY & 0x80000) ? (rawY | 0xFFF00000) : rawY;
+
   int32_t rawZ = ((uint32_t)rawBuf[6] << 12) | ((uint32_t)rawBuf[7] << 4) | (rawBuf[8] >> 4);
+  rawZ = (rawZ & 0x80000) ? (rawZ | 0xFFF00000) : rawZ;
 
-  if (rawX & 0x80000) rawX |= 0xFFF00000;
-  if (rawY & 0x80000) rawY |= 0xFFF00000;
-  if (rawZ & 0x80000) rawZ |= 0xFFF00000;
-
-  // Conversion brute -> g
   data.x = (float)rawX * LSB_TO_G;
   data.y = (float)rawY * LSB_TO_G;
   data.z = (float)rawZ * LSB_TO_G;
@@ -105,37 +109,42 @@ void setup() {
     delay(20);
     writeRegister(CS_PINS[i], ADXL357_REG_FILTER, 0x01); // ODR 2000Hz
     writeRegister(CS_PINS[i], ADXL357_REG_SYNC, 0x02);   // Sync externe
-    writeRegister(CS_PINS[i], ADXL357_REG_POWER_CTL, 0x00); // Mode mesure
+    writeRegister(CS_PINS[i], ADXL357_REG_POWER_CTL, 0x00); 
     delay(10);
   }
 
-  Serial.println("Timestamp(us),S1_X(g),S1_Y(g),S1_Z(g),S2_X(g),S2_Y(g),S2_Z(g),S3_X(g),S3_Y(g),S3_Z(g)");
   triggerSync();
 }
 
 void loop() {
   static uint32_t nextSyncTime = 0;
-  const uint32_t syncIntervalUs = 500; // 2000 Hz
+  const uint32_t syncIntervalUs = 500;
+
+  
 
   if ((micros() - nextSyncTime) >= syncIntervalUs) {
-    nextSyncTime += syncIntervalUs; // Incrément fixe pour éviter la dérive
+    nextSyncTime = micros();
 
-    AccelData samples[3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+    SensorPacket pkt;
+    pkt.timestamp = nextSyncTime;
 
     for (int i = 0; i < NUM_SENSORS; i++) {
       uint8_t entries = readRegister(CS_PINS[i], ADXL357_REG_FIFO_ENTRIES);
       if (entries >= 1) {
-        samples[i] = readSensorFIFO(CS_PINS[i]);
+        AccelData d = readSensorFIFO(CS_PINS[i]);
+        pkt.axis[i][0] = d.x;
+        pkt.axis[i][1] = d.y;
+        pkt.axis[i][2] = d.z;
+      } else {
+        pkt.axis[i][0] = 0.0f;
+        pkt.axis[i][1] = 0.0f;
+        pkt.axis[i][2] = 0.0f;
       }
     }
 
     triggerSync();
 
-    uint32_t ts = nextSyncTime;
-    Serial.printf("%lu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
-                  ts,
-                  samples[0].x, samples[0].y, samples[0].z,
-                  samples[1].x, samples[1].y, samples[1].z,
-                  samples[2].x, samples[2].y, samples[2].z);
+    // Envoi binaire brut instantané (zéro conversion de texte)
+    Serial.write((uint8_t*)&pkt, sizeof(pkt));
   }
 }
